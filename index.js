@@ -1,43 +1,94 @@
 const puppeteer = require("puppeteer");
+const fs = require("fs");
+const path = require("path");
+const dir = path.join(__dirname, "final.json");
+const {
+  fullLists,
+  PuppeteerBlocker,
+  Request,
+  FiltersEngine
+} = require("@cliqz/adblocker-puppeteer");
+const fetch = require("cross-fetch");
+const parseDomain = require("parse-domain");
+const chalk = require("chalk");
+const inquirer = require("inquirer");
+const { PendingXHR } = require("pending-xhr-puppeteer");
 
-const list = require("./list");
-
-const regExp = new RegExp(
-  /https:\/\/a.spolecznosci\.net\/core\/.*\/main\.js/,
-  "g"
-);
+//console.log(dir);
 
 (async () => {
-  const browser = await puppeteer.launch();
+  const getSite = await inquirer.prompt({
+    type: "input",
+    name: "url",
+    message: "Podaj url"
+  });
+
+  console.log("Czekaj ...")
+
+  const rawdata = await fs.readFileSync(dir);
+  const data = JSON.parse(rawdata);
+  let detect = new Set();
+
+  const blocker = await FiltersEngine.fromLists(
+    fetch,
+    [
+      "https://raw.githubusercontent.com/hl2guide/All-in-One-Customized-Adblock-List/master/aio.txt"
+    ],
+    {
+      enableCompression: true
+    }
+  );
+
+  const browser = await puppeteer.launch({
+    headless: true,
+    args: ["--start-maximized"]
+  });
   const page = await browser.newPage();
-  for (const link of list) {
-    try{
+  await page.setViewport({
+    width: 1920,
+    height: 1080
+  });
+  const pendingXHR = new PendingXHR(page);
 
-    try {
-      await page.goto(`https://${link}`, { waitUntil: "networkidle2" });
-    } catch (error) {
-      await page.goto(`http://${link}`, { waitUntil: "networkidle2" });
+  page.on("request", request => {
+    const domain = parseDomain(request._url) || "";
+    var textDomain = `${domain.domain}.${domain.tld}` || "";
+    if (domain.domain){
+      detect.add(textDomain);
     }
+    blocker.match(Request.fromRawDetails({ url: request.url() }));
+  });
 
-    await page.waitFor(5000);
+  blocker.on("request-blocked", request => {
+    const { domain, hostname, url } = request;
+    detect.add(domain);
+  });
 
-    const scriptTag = await page.evaluate(() => {
-      const scriptSRC = [...document.querySelectorAll("script")].flatMap(x => [x.src,x.innerHTML]);
-      return scriptSRC;
-    });
-
-
-    const matchScriptTag = scriptTag
-      .filter(x => regExp.test(x))
-      .flatMap(x => x.match(regExp));
-
-    const uniqueMatchScriptTag = [...new Set(matchScriptTag)];
-
-    console.log(link,(uniqueMatchScriptTag.length ? uniqueMatchScriptTag[0]: "NONE_MAIN"));
-    }catch{
-        console.log(link,"ERROR")
-    }
-  }
-
+  await page.goto(getSite.url, {
+    waitUntil: "networkidle2"
+  });
+  await pendingXHR.waitForAllXhrFinished();
+  await page.waitFor(5000);
   await browser.close();
+
+  const reportDetect = [...detect].map(x => {
+    const searchData = data.find(y => y.domain == x);
+    if (!searchData) {
+      return { domain: x, categories: ["not_Adblock"] };
+    }
+    return searchData;
+  });
+
+  reportDetect.forEach(x => {
+    let { domain, categories } = x;
+    if (!categories.length) {
+      categories = "NOT_DEFINED";
+    }
+    if (categories.includes("not_Adblock")) {
+      console.log(`${chalk.black.bgGreen.bold([domain])}: ${categories} \n`);
+    } else {
+      console.log(`${chalk.white.bgRed.bold([domain])}: ${categories} \n`);
+    }
+  });
+
 })();
